@@ -9,3 +9,5 @@ requests
 Werkzeug
 gunicorn
 openpyxl
+transformers
+sentence_transformers
