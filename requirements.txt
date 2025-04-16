@@ -12,3 +12,4 @@ openpyxl
 transformers
 sentence_transformers
 faiss-cpu
+dateparser
