@@ -1,38 +1,36 @@
 # Flask and related utilities
-Flask==2.1.2
-flask-cors==3.0.10
+Flask
+flask-cors
 
 # Environment variable management
-python-dotenv==0.21.0
+python-dotenv
 
 # Natural Language Processing
-spacy==3.5.0
+spacy
 
 # Data processing and analysis
-pandas==1.5.2
-numpy==1.23.5
-
+pandas
+numpy
 # FAISS for vector similarity search
-faiss-cpu==1.7.2
+faiss-cpu
 
 # Date parsing
-dateparser==1.1.8
+dateparser
 
 # MongoDB client
-pymongo==4.2.0
+pymongo
 
 # Fuzzy string matching
-rapidfuzz==2.13.7
+rapidfuzz
 
 # Security helpers
-Werkzeug==2.1.2
+Werkzeug
 
 # Transformers and Sentence Transformers for language models and embeddings
-transformers==4.25.1
-sentence-transformers==2.2.2
-
-# Deep Learning framework (required by transformers and sentence-transformers)
-torch==1.12.1
+transformers
+sentence-transformers
+# Deep Learning framework (updated torch version)
+torch
 
 # Excel file processing
-openpyxl==3.0.10
+openpyxl
