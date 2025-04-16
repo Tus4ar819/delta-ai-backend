@@ -10,6 +10,7 @@ Werkzeug
 gunicorn
 openpyxl
 transformers
-sentence_transformers
-faiss-cpu
-dateparser
+  faiss-cpu
+  dateparser
+  sentencepiece
+
