@@ -31,6 +31,7 @@ transformers
 sentence-transformers
 # Deep Learning framework (updated torch version)
 torch
+gunicorn
 
 # Excel file processing
 openpyxl
