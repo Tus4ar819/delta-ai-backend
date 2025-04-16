@@ -5,17 +5,23 @@ import json
 import logging
 import spacy
 import pandas as pd
+import numpy as np
+import faiss
+import dateparser
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pymongo import MongoClient
 from rapidfuzz import fuzz, process
 from werkzeug.security import generate_password_hash, check_password_hash
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+from sentence_transformers import SentenceTransformer
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging (set debug level and format)
+# Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s')
 print("Logging is configured at DEBUG level.")
 
@@ -23,7 +29,18 @@ print("Logging is configured at DEBUG level.")
 nlp = spacy.load("en_core_web_sm")
 print("spaCy model loaded: en_core_web_sm")
 
-# Initialize Flask app and enable CORS (adjust for production)
+# Load transformer T5 model and tokenizer
+print("Loading transformer model T5-base...")
+tokenizer = T5Tokenizer.from_pretrained("t5-base")
+model = T5ForConditionalGeneration.from_pretrained("t5-base")
+print("Transformer model T5-base loaded.")
+
+# Load SentenceTransformer for embeddings
+print("Loading embedding model (all-MiniLM-L6-v2)...")
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+print("Embedding model loaded.")
+
+# Initialize Flask app and enable CORS
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": [
     "https://dealta-ai.onrender.com",
@@ -77,6 +94,7 @@ def check_db_connection():
         return False, f"MongoDB connection failed: {str(e)}"
 
 # -------------------- Helper Functions for Text Processing --------------------
+
 SPELLING_CORRECTIONS = {
     "salry": "salary",
     "attndance": "attendance",
@@ -145,7 +163,7 @@ def find_best_match(query, query_words):
     for word in map(correct_spelling, query_words):
         result = process.extractOne(word, schema_name, scorer=fuzz.partial_ratio)
         if result:
-            match, score, _ = result  # Unpack and ignore the index
+            match, score, _ = result
             if score > 80 and match in query_lower:
                 found_schema.append(match)
                 print(f"Fuzzy matched word '{word}' to '{match}' with score {score}")
@@ -204,6 +222,22 @@ def get_employee_data(employee_name, requested_fields):
 def extract_context_and_schema_name(query):
     print(f"Extracting context and schema from query: {query}")
     query = query.strip()
+    
+    # Check for structured filters first
+    filters = extract_query_filters(query)
+    if filters:
+        db = get_database()
+        employees_collection = db["employees"]
+        result_data = list(employees_collection.find(filters, {"_id": 0}))
+        response = {
+            "query": query,
+            "filters": filters,
+            "result": result_data,
+            "description": "Custom filter applied based on query content."
+        }
+        return response
+
+    # Existing logic for name extraction if no filters found.
     for wrong, correct in SPELLING_CORRECTIONS.items():
         query = query.replace(wrong, correct)
         print(f"Corrected spelling: '{wrong}' -> '{correct}'")
@@ -222,6 +256,60 @@ def extract_context_and_schema_name(query):
     logging.debug(f"Extracted context and schema: {response}")
     return response
 
+# -------------------- New Helper: Extract Query Filters --------------------
+def extract_query_filters(query):
+    filters = {}
+    query_lower = query.lower()
+
+    # Handle "last month" queries for date of joining (doj)
+    if "last month" in query_lower:
+        today = datetime.today()
+        first_day_this_month = today.replace(day=1)
+        last_month_end = first_day_this_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        filters["doj"] = {
+            "$gte": last_month_start.strftime("%Y-%m-%d"),
+            "$lte": last_month_end.strftime("%Y-%m-%d")
+        }
+
+    # Numeric range filter for age (using updated regex)
+    age_pattern = re.search(r'age\s+between\s+(\d+)\s*(?:and|to|-)\s*(\d+)', query_lower)
+    if age_pattern:
+        lower_age = int(age_pattern.group(1))
+        upper_age = int(age_pattern.group(2))
+        current_year = datetime.today().year
+        dob_lower = f"{current_year - upper_age}-01-01"
+        dob_upper = f"{current_year - lower_age}-12-31"
+        filters["dob"] = {"$gte": dob_lower, "$lte": dob_upper}
+
+    # Salary range filter (new addition)
+    salary_pattern = re.search(r'salary\s+between\s+(\d+)\s*(?:and|to|-)\s*(\d+)', query_lower)
+    if salary_pattern:
+        lower_sal = int(salary_pattern.group(1))
+        upper_sal = int(salary_pattern.group(2))
+        filters["salary"] = {"$gte": lower_sal, "$lte": upper_sal}
+
+    # Full details query e.g., "give details of John Doe"
+    name_pattern = re.search(r'details\s+of\s+([A-Za-z\s]+)', query, re.IGNORECASE)
+    if name_pattern:
+        filters["name"] = name_pattern.group(1).strip()
+
+    return filters
+
+   
+# -------------------- Vector Embedding and FAISS Indexing --------------------
+def compute_embedding(text):
+    return embedding_model.encode(text)
+
+def build_vector_index(records):
+    # Build texts from records (concatenating selected fields)
+    texts = [record.get("name", "") + " " + record.get("skills", "") for record in records]
+    embeddings = np.array([compute_embedding(text) for text in texts]).astype("float32")
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index, embeddings, texts
+
 # -------------------- API Endpoints --------------------
 
 @app.route('/register', methods=['POST'])
@@ -229,7 +317,7 @@ def register():
     print("Processing registration request.")
     data = request.json
     username = data.get("username")
-    password = data.get("password")  # Plain text (not secure for production)
+    password = data.get("password")
     email = data.get("email")
     if not username or not password or not email:
         error_msg = "All fields are required"
@@ -281,12 +369,10 @@ def api_check_connection():
     else:
         return jsonify({"connection": False, "message": message}), 500
 
-# -------------------- Updated Employee Save Endpoint --------------------
 @app.route("/save-employee", methods=["POST"])
 def save_employee():
     print("Processing employee save request.")
     data = request.get_json()
-    # Required fields (adjust as needed)
     required_fields = ["name", "dob", "phone", "email", "skills", "doj", "salary", "feedback"]
     for field in required_fields:
         if not data.get(field):
@@ -294,10 +380,10 @@ def save_employee():
             print(error_msg)
             return jsonify({"error": error_msg}), 400
 
-    # Split data into employee info and feedback
     employee_info = {
         "name": data.get("name"),
         "dob": data.get("dob"),
+        "gender": data.get("gender"),
         "phone": data.get("phone"),
         "email": data.get("email"),
         "skills": data.get("skills"),
@@ -314,19 +400,15 @@ def save_employee():
     feedbacks_collection = db["feedbacks"]
 
     try:
-        # Insert employee information first
         employee_result = employees_collection.insert_one(employee_info)
         employee_id = employee_result.inserted_id
         print(f"Inserted employee with ID: {employee_id}")
-
-        # Insert feedback in a separate collection with reference to employee_id
         feedback_doc = {
             "employee_id": str(employee_id),
             "feedback": feedback_value
         }
         feedbacks_collection.insert_one(feedback_doc)
         print("Feedback saved successfully.")
-
         return jsonify({"message": "Employee and feedback saved successfully!"}), 201
     except Exception as e:
         error_msg = f"Error saving employee: {e}"
@@ -352,7 +434,6 @@ def upload_file():
         print(error_msg)
         return jsonify({"status": "error", "message": error_msg}), 400
     try:
-        # Use openpyxl engine explicitly
         df = pd.read_excel(file, engine="openpyxl")
     except Exception as read_error:
         error_msg = f"Excel file reading error: {read_error}"
@@ -371,15 +452,18 @@ def upload_file():
         db = get_database()
         collection = db[table_name]
         collection.insert_many(records)
+        # Build vector index for the uploaded records
+        index, embeddings, texts = build_vector_index(records)
+        print("Vector index built for uploaded records.")
+        # (Optionally, store index details or persist embeddings as needed)
     except Exception as db_error:
         error_msg = f"Database insertion error: {db_error}"
         print(error_msg)
         return jsonify({"status": "error", "message": error_msg}), 500
 
-    success_msg = f"Data uploaded to collection '{table_name}' successfully!"
+    success_msg = f"Data uploaded to collection '{table_name}' successfully, and vector index created!"
     print(success_msg)
     return jsonify({"status": "success", "message": success_msg})
-
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -387,13 +471,72 @@ def chat():
     data = request.json
     queries = data.get("queries", [])
     results = {}
+    db = get_database()
+    employees_collection = db["employees"]
+
     for i, query in enumerate(queries, start=1):
         print(f"Processing query {i}: {query}")
-        result = extract_context_and_schema_name(query)
-        results[f"query{i}"] = result
+        
+        # First, try to extract structured filters
+        filters = extract_query_filters(query)
+        if filters:
+            print(f"Structured filters extracted: {filters}")
+            # Query the database using the extracted filters
+            # Use an appropriate projection (for example, all fields or limited ones)
+            result_data = list(employees_collection.find(filters, {"_id": 0}))
+            
+            results[f"query{i}"] = {
+                "query": query,
+                "filters": filters,
+                "result": result_data,
+                "description": "Custom filter applied based on query content."
+            }
+        else:
+            # Fallback to the current logic that expects an employee name and field-specific extraction
+            response = extract_context_and_schema_name(query)
+            results[f"query{i}"] = response
+
     logging.debug(f"Chat results: {results}")
     print(f"Chat results: {results}")
     return jsonify(results)
+
+
+@app.route("/api/nlp_query", methods=["POST"])
+def nlp_query():
+    data = request.json
+    user_query = data.get("query", "").strip()
+    
+    # First, try to extract structured filters (date ranges, numeric ranges, full details)
+    filters = extract_query_filters(user_query)
+    if filters:
+        db = get_database()
+        employees_collection = db["employees"]
+        # If full details for a specific employee, return all fields
+        projection = {"_id": 0} if "name" in filters else {"name": 1, "doj": 1, "dob": 1}
+        result = list(employees_collection.find(filters, projection))
+        return jsonify({
+            "mongo_query": filters,
+            "result": result,
+            "description": "Custom filter applied based on query content."
+        })
+    
+    # Fallback: Use the transformer model to generate a query
+    prompt = f"Convert the following natural language request into a MongoDB query for the 'employees' collection: '{user_query}'"
+    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    output_ids = model.generate(input_ids, max_length=150)
+    generated_query_str = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    try:
+        mongo_query = eval(generated_query_str)
+        db = get_database()
+        result = list(db["employees"].find(mongo_query, {"_id": 0}))
+        return jsonify({
+            "mongo_query": mongo_query,
+            "result": result,
+            "generated_query_str": generated_query_str
+        })
+    except Exception as e:
+        return jsonify({"error": f"Error processing query: {str(e)}"}), 500
 
 @app.route("/api/collections", methods=["GET"])
 def get_all_collections():
